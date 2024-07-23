@@ -32,18 +32,13 @@ public class Uploader extends AsyncTask<UploadParams, int[], UploadResult> {
     protected UploadResult doInBackground(UploadParams... uploadParams) {
         mParams = uploadParams[0];
         res = new UploadResult();
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    upload(mParams, res);
-                    mParams.onUploadComplete.onUploadComplete(res);
-                } catch (Exception e) {
-                    res.exception = e;
-                    mParams.onUploadComplete.onUploadComplete(res);
-                }
-            }
-        }).start();
+        try {
+            upload(mParams, res);
+        } catch (Exception e) {
+            res.exception = e;
+        } finally {
+            mParams.onUploadComplete.onUploadComplete(res);
+        }
         return res;
     }
 
@@ -54,156 +49,145 @@ public class Uploader extends AsyncTask<UploadParams, int[], UploadResult> {
         String twoHyphens = "--";
         String boundary = "*****";
         String tail = crlf + twoHyphens + boundary + twoHyphens + crlf;
-        String metaData = "", stringData = "";
-        String[] fileHeader;
-        int statusCode, byteSentTotal;
-        int fileCount = 0;
-        long totalFileLength = 0;
         BufferedInputStream responseStream = null;
         BufferedReader responseStreamReader = null;
-        String name, filename, filetype;
-        try {
-            Object[] files = params.files.toArray();
-            boolean binaryStreamOnly = params.binaryStreamOnly;
 
+        try {
             connection = (HttpURLConnection) params.src.openConnection();
             connection.setDoOutput(true);
-            ReadableMapKeySetIterator headerIterator = params.headers.keySetIterator();
             connection.setRequestMethod(params.method);
-            if (!binaryStreamOnly) {
-                connection.setRequestProperty("Content-Type", "multipart/form-data;boundary=" + boundary);
-            }
+
+            ReadableMapKeySetIterator headerIterator = params.headers.keySetIterator();
             while (headerIterator.hasNextKey()) {
                 String key = headerIterator.nextKey();
                 String value = params.headers.getString(key);
                 connection.setRequestProperty(key, value);
             }
 
-            ReadableMapKeySetIterator fieldsIterator = params.fields.keySetIterator();
+            if (!params.binaryStreamOnly) {
+                connection.setRequestProperty("Content-Type", "multipart/form-data;boundary=" + boundary);
+            }
 
+            StringBuilder metaDataBuilder = new StringBuilder();
+            ReadableMapKeySetIterator fieldsIterator = params.fields.keySetIterator();
             while (fieldsIterator.hasNextKey()) {
                 String key = fieldsIterator.nextKey();
                 String value = params.fields.getString(key);
-                metaData += twoHyphens + boundary + crlf + "Content-Disposition: form-data; name=\"" + key + "\"" + crlf + crlf + value +crlf;
+                metaDataBuilder.append(twoHyphens).append(boundary).append(crlf)
+                        .append("Content-Disposition: form-data; name=\"").append(key).append("\"")
+                        .append(crlf).append(crlf).append(value).append(crlf);
             }
-            stringData += metaData;
-            fileHeader = new String[files.length];
-            for (ReadableMap map : params.files) {
-                try {
-                    name = map.getString("name");
-                    filename = map.getString("filename");
-                    filetype = map.getString("filetype");
-                } catch (NoSuchKeyException e) {
-                    name = map.getString("name");
-                    filename = map.getString("filename");
-                    filetype = getMimeType(map.getString("filepath"));
-                }
+            String metaData = metaDataBuilder.toString();
+
+            StringBuilder stringDataBuilder = new StringBuilder();
+            stringDataBuilder.append(metaData);
+            String[] fileHeader = new String[params.files.size()];
+            long totalFileLength = 0;
+
+            for (int i = 0; i < params.files.size(); i++) {
+                ReadableMap map = params.files.getMap(i);
+                String name = map.getString("name");
+                String filename = map.getString("filename");
+                String filetype = map.hasKey("filetype") ? map.getString("filetype") : getMimeType(map.getString("filepath"));
                 File file = new File(map.getString("filepath"));
                 long fileLength = file.length();
                 totalFileLength += fileLength;
-                if (!binaryStreamOnly) {
+
+                if (!params.binaryStreamOnly) {
                     String fileHeaderType = twoHyphens + boundary + crlf +
                             "Content-Disposition: form-data; name=\"" + name + "\"; filename=\"" + filename + "\"" + crlf +
                             "Content-Type: " + filetype + crlf;
-                    ;
-                    if (files.length - 1 == fileCount){
+                    if (i == params.files.size() - 1) {
                         totalFileLength += tail.length();
                     }
 
                     String fileLengthHeader = "Content-length: " + fileLength + crlf;
-                    fileHeader[fileCount] = fileHeaderType + fileLengthHeader + crlf;
-                    stringData += fileHeaderType + fileLengthHeader + crlf;
+                    fileHeader[i] = fileHeaderType + fileLengthHeader + crlf;
+                    stringDataBuilder.append(fileHeaderType).append(fileLengthHeader).append(crlf);
                 }
-                fileCount++;
             }
-            fileCount = 0;
-            if (mParams.onUploadBegin != null) {
-                mParams.onUploadBegin.onUploadBegin();
-            }
-            if (!binaryStreamOnly) {
-                long requestLength = totalFileLength;
-                requestLength += stringData.length() + files.length * crlf.length();
-                connection.setRequestProperty("Content-length", "" +(int) requestLength);
-                connection.setFixedLengthStreamingMode((int)requestLength);
-            }
+
+            String stringData = stringDataBuilder.toString();
+            long requestLength = totalFileLength + stringData.length() + params.files.size() * crlf.length();
+            connection.setRequestProperty("Content-length", String.valueOf(requestLength));
+            connection.setFixedLengthStreamingMode((int) requestLength);
             connection.connect();
 
             request = new DataOutputStream(connection.getOutputStream());
             WritableByteChannel requestChannel = Channels.newChannel(request);
 
-            if (!binaryStreamOnly) {
+            if (!params.binaryStreamOnly) {
                 request.writeBytes(metaData);
             }
 
-            byteSentTotal = 0;
-
-            for (ReadableMap map : params.files) {
-                if (!binaryStreamOnly) {
-                    request.writeBytes(fileHeader[fileCount]);
+            int byteSentTotal = 0;
+            for (int i = 0; i < params.files.size(); i++) {
+                ReadableMap map = params.files.getMap(i);
+                if (!params.binaryStreamOnly) {
+                    request.writeBytes(fileHeader[i]);
                 }
 
                 File file = new File(map.getString("filepath"));
-
                 long fileLength = file.length();
                 long bufferSize = (long) Math.ceil(fileLength / 100.f);
                 long bytesRead = 0;
 
-                FileInputStream fileStream = new FileInputStream(file);
-                FileChannel fileChannel = fileStream.getChannel();
+                try (FileInputStream fileStream = new FileInputStream(file);
+                     FileChannel fileChannel = fileStream.getChannel()) {
 
-                while (bytesRead < fileLength) {
-                    long transferredBytes = fileChannel.transferTo(bytesRead, bufferSize, requestChannel);
-                    bytesRead += transferredBytes;
+                    while (bytesRead < fileLength) {
+                        long transferredBytes = fileChannel.transferTo(bytesRead, bufferSize, requestChannel);
+                        bytesRead += transferredBytes;
 
-                    if (mParams.onUploadProgress != null) {
-                        byteSentTotal += transferredBytes;
-                        mParams.onUploadProgress.onUploadProgress((int) totalFileLength, byteSentTotal);
+                        if (mParams.onUploadProgress != null) {
+                            byteSentTotal += transferredBytes;
+                            mParams.onUploadProgress.onUploadProgress((int) totalFileLength, byteSentTotal);
+                        }
                     }
                 }
 
-                if (!binaryStreamOnly) {
+                if (!params.binaryStreamOnly) {
                     request.writeBytes(crlf);
                 }
-
-                fileCount++;
-                fileStream.close();
             }
 
-            if (!binaryStreamOnly) {
+            if (!params.binaryStreamOnly) {
                 request.writeBytes(tail);
             }
+
             request.flush();
-            request.close();
 
             responseStream = new BufferedInputStream(connection.getInputStream());
             responseStreamReader = new BufferedReader(new InputStreamReader(responseStream));
             WritableMap responseHeaders = Arguments.createMap();
             Map<String, List<String>> map = connection.getHeaderFields();
             for (Map.Entry<String, List<String>> entry : map.entrySet()) {
-                int count = 0;
-                responseHeaders.putString(entry.getKey(), entry.getValue().get(count));
+                responseHeaders.putString(entry.getKey(), entry.getValue().get(0));
             }
-            StringBuilder stringBuilder = new StringBuilder();
-            String line = "";
 
+            StringBuilder responseBuilder = new StringBuilder();
+            String line;
             while ((line = responseStreamReader.readLine()) != null) {
-                stringBuilder.append(line).append("\n");
+                responseBuilder.append(line).append("\n");
             }
 
-            String response = stringBuilder.toString();
-            statusCode = connection.getResponseCode();
-            res.headers = responseHeaders;
-            res.body = response;
-            res.statusCode = statusCode;
+            result.headers = responseHeaders;
+            result.body = responseBuilder.toString();
+            result.statusCode = connection.getResponseCode();
+
         } finally {
-            if (connection != null)
+            if (connection != null) {
                 connection.disconnect();
-            if (request != null)
+            }
+            if (request != null) {
                 request.close();
-            if (responseStream != null)
+            }
+            if (responseStream != null) {
                 responseStream.close();
-            if (responseStreamReader != null)
+            }
+            if (responseStreamReader != null) {
                 responseStreamReader.close();
+            }
         }
     }
 
